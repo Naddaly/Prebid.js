@@ -1,18 +1,12 @@
-import { buildUrl, deepAccess, deepSetValue, generateUUID, getWinDimensions, getWindowSelf, getWindowTop, isEmpty, isStr, logWarn } from '../src/utils.js';
-import { registerBidder } from '../src/adapters/bidderFactory.js';
+import { buildUrl, generateUUID, isEmpty, isStr, logWarn } from '../src/utils.js';
+import { BidderSpec, registerBidder } from '../src/adapters/bidderFactory.js';
 import { BANNER, VIDEO } from '../src/mediaTypes.js';
-import { getBoundingClientRect } from '../libraries/boundingClientRect/boundingClientRect.js';
 import { getGlobal } from '../src/prebidGlobal.js';
+import { isMainPageAccessible, copyDeepPaths, mapToPayloadBannerBid, mapToPayloadVideoBid } from '../libraries/stroeerCoreUtils/stroeerCoreUtils.js';
+import { BasePayload } from '../libraries/stroeerCoreUtils/stroeerCoreTypes.js';
+import { BIDDER_CODE, GVL_ID, DEFAULT_HOST, DEFAULT_PATH, DEFAULT_PORT, FIVE_MINUTES_IN_SECONDS, USER_SYNC_IFRAME_URL } from '../libraries/stroeerCoreUtils/constants.js';
 
-const GVL_ID = 136;
-const BIDDER_CODE = 'stroeerCore';
-const DEFAULT_HOST = 'hb.adscale.de';
-const DEFAULT_PATH = '/dsh';
-const DEFAULT_PORT = '';
-const FIVE_MINUTES_IN_SECONDS = 300;
-const USER_SYNC_IFRAME_URL = 'https://js.adscale.de/pbsync.html';
-
-export const spec = {
+export const spec: BidderSpec<typeof BIDDER_CODE> = {
   code: BIDDER_CODE,
   gvlid: GVL_ID,
   supportedMediaTypes: [BANNER, VIDEO],
@@ -45,12 +39,13 @@ export const spec = {
     };
   }()),
 
-  buildRequests: function (validBidRequests = [], bidderRequest) {
+  // TODO: This should not be any
+  buildRequests: function (validBidRequests = [], bidderRequest: any) {
     const anyBid = bidderRequest.bids[0];
 
     const refererInfo = bidderRequest.refererInfo;
 
-    const basePayload = {
+    const basePayload: BasePayload = {
       id: generateUUID(),
       ref: refererInfo.ref,
       mpa: isMainPageAccessible(),
@@ -64,6 +59,7 @@ export const spec = {
 
     const eids = anyBid.userIdAsEids;
 
+    // Note make it a one liner? basePayload.user.eids = eids ? should work? Also, isn't an empty object falsy?
     if (!isEmpty(eids)) {
       basePayload.user = {
         eids: eids
@@ -104,7 +100,8 @@ export const spec = {
       serverResponse.body.bids.forEach(bidResponse => {
         const mediaType = bidResponse.vastXml != null ? VIDEO : BANNER;
 
-        const bid = {
+        // TODO: define type
+        const bid: any = {
           requestId: bidResponse.bidId,
           cpm: bidResponse.cpm || 0,
           width: bidResponse.width || 0,
@@ -142,41 +139,6 @@ export const spec = {
   }
 };
 
-const isMainPageAccessible = () => {
-  try {
-    return !!getWindowTop().location.href;
-  } catch (ignore) {
-    return false;
-  }
-};
-
-const elementInView = (elementId) => {
-  // TODO this should use getAdUnitElement
-  const resolveElement = (elId) => {
-    const win = getWindowSelf();
-
-    return win.document.getElementById(elId);
-  };
-
-  const visibleInWindow = (el, win) => {
-    const rect = getBoundingClientRect(el);
-    const inView = (rect.top + rect.height >= 0) && (rect.top <= getWinDimensions().innerHeight);
-
-    if (win !== win.parent) {
-      return inView && visibleInWindow(win.frameElement, win.parent);
-    }
-
-    return inView;
-  };
-
-  try {
-    return visibleInWindow(resolveElement(elementId), getWindowSelf());
-  } catch (e) {
-    // old browser, element not found, cross-origin etc.
-  }
-  return undefined;
-};
-
 const buildEndpointUrl = ({ host: hostname = DEFAULT_HOST, port = DEFAULT_PORT, securePort, path: pathname = DEFAULT_PATH }) => {
   if (securePort) {
     port = securePort;
@@ -207,98 +169,6 @@ const hasVideo = bidReq => {
   return mediaTypes &&
     mediaTypes.video &&
     ['instream', 'outstream'].indexOf(mediaTypes.video.context) > -1;
-};
-
-const mapToPayloadBaseBid = (bidRequest) => {
-  const bid = {
-    bid: bidRequest.bidId,
-    sid: bidRequest.params.sid,
-    viz: elementInView(bidRequest.adUnitCode),
-    sfp: bidRequest.params.sfp,
-    tid: bidRequest.transactionId,
-  };
-  copyDeepPaths(bid, bidRequest.ortb2Imp, ['ext.gpid'], 'ortb2Imp');
-  return bid;
-};
-
-const mapToPayloadBannerBid = (bidRequest) => {
-  const sizes = deepAccess(bidRequest, 'mediaTypes.banner.sizes') || [];
-  return ({
-    ban: {
-      siz: sizes,
-      fp: createFloorPriceObject(BANNER, sizes, bidRequest)
-    },
-    ...mapToPayloadBaseBid(bidRequest)
-  });
-};
-
-const mapToPayloadVideoBid = (bidRequest) => {
-  const video = deepAccess(bidRequest, 'mediaTypes.video') || {};
-  return {
-    vid: {
-      ctx: video.context,
-      siz: video.playerSize,
-      mim: video.mimes,
-      fp: createFloorPriceObject(VIDEO, [video.playerSize], bidRequest),
-    },
-    ...mapToPayloadBaseBid(bidRequest)
-  };
-};
-
-const createFloorPriceObject = (mediaType, sizes, bidRequest) => {
-  if (!bidRequest.getFloor) {
-    return undefined;
-  }
-
-  const defaultFloor = bidRequest.getFloor({
-    currency: 'EUR',
-    mediaType: mediaType,
-    size: '*'
-  }) || {};
-
-  const sizeFloors = sizes.map(size => {
-    const floor = bidRequest.getFloor({
-      currency: 'EUR',
-      mediaType: mediaType,
-      size: [size[0], size[1]]
-    }) || {};
-    return { ...floor, size };
-  });
-
-  const floorWithCurrency = (([defaultFloor].concat(sizeFloors)) || []).find(floor => floor.currency);
-
-  if (!floorWithCurrency) {
-    return undefined;
-  }
-
-  const currency = floorWithCurrency.currency;
-  const defaultFloorPrice = defaultFloor.currency === currency ? defaultFloor.floor : undefined;
-
-  return {
-    def: defaultFloorPrice,
-    cur: currency,
-    siz: sizeFloors
-      .filter(sizeFloor => sizeFloor.currency === currency)
-      .filter(sizeFloor => sizeFloor.floor !== defaultFloorPrice)
-      .map(sizeFloor => ({
-        w: sizeFloor.size[0],
-        h: sizeFloor.size[1],
-        p: sizeFloor.floor
-      }))
-  };
-};
-
-const copyDeepPaths = (target, source, paths, targetPrefix = '') => {
-  paths.forEach(path => {
-    const value = deepAccess(source, path);
-    if (value !== undefined) {
-      const targetPath = targetPrefix
-        ? `${targetPrefix}.${path}`
-        : path;
-
-      deepSetValue(target, targetPath, value);
-    }
-  });
 };
 
 registerBidder(spec);
